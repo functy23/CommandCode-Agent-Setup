@@ -230,7 +230,16 @@ def display_name(name):
     return re.sub(r"\s*\((latest|exp)\)\s*$", "", name or "").strip()
 
 def levels_for(slug):
-    return list(KNOWN_EFFORTS.get(slug, DEFAULT_LEVELS))
+    """写入 codex catalog 的档位集。
+
+    【实测 2026-09-06】ChatGPT.app（原 Codex 桌面版 GUI）的推理强度菜单不认识
+    max（TUI 源码 is_advanced_reasoning_effort 把 Max/Ultra 归入『More reasoning…』
+    高级弹窗，GUI 前端则直接不渲染），只认识 none/minimal/low/medium/high/xhigh。
+    因此权威表中的 max 统一映射为 xhigh（GUI 显示『极高』）——上游网关对两者
+    均返回 200，xhigh 即为 GUI 可选的最高档；CLI 侧 /model 的『More reasoning…』
+    行为不变。"""
+    raw = KNOWN_EFFORTS.get(slug, DEFAULT_LEVELS)
+    return ["xhigh" if lv == "max" else lv for lv in raw]
 
 def default_level(slug):
     return levels_for(slug)[-1]

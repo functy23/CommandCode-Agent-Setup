@@ -158,7 +158,11 @@ Select Reasoning Level for gpt-5.6-sol               ← catalog [low..max] 5 �
 › 5. More reasoning… (current)  Max consumes usage limits faster   ← max
 ```
 
-与 ZCode/DSH 的差异本质：ZCode/DSH 的 UI 直接显示 variants 字面量（如 off/high/max），Codex TUI 做了展示层改名。数据链路（CC Switch DB → `~/.codex/cc-switch-model-catalog.json` → codex）与实际请求（`model_reasoning_effort = "max"` → 上游 200，`codex exec` 输出 `reasoning effort: max`）都已实测正确，**不要因此去改 catalog 档位数据**。
+与 ZCode/DSH 的差异本质：ZCode/DSH 的 UI 直接显示 variants 字面量（如 off/high/max），Codex TUI 做了展示层改名。
+
+**【实测 2026-09-06 续】ChatGPT.app（原 Codex 桌面版 GUI，bundle `com.openai.codex`，内嵌 codex 0.151.0-alpha）的行为不同且更严**：GUI 读取同一套 `~/.codex/config.toml` + `model_catalog_json`（左下角显示 provider 名与「模型 档位」），但其推理强度子菜单**不渲染 max 档**——catalog `[low,high,max]` 的 GLM-5.3 Flash 只显示「轻度/高」两项，max 被静默丢弃（GUI i18n 里有 max{Max} 映射，但菜单构建按白名单过滤；TUI 的 max/Ultra→More reasoning… 归档逻辑与 GUI 前端不一致）。GUI 认识 `xhigh`（显示「极高」）。
+
+**修复（已实现于 common.levels_for）**：写 codex catalog 时把档位集里的 `max` 统一替换为 `xhigh`（default 同步取末位）——GUI 显示「极高」作为可选最高档；上游网关对 xhigh 与 max 均返回 200（实测），推理深度等效。ZCode 侧不受影响（仍用 off/high/max 等原字面量）。实验过程：把 catalog 档位手工改为 [low,high,xhigh] 并重启 ChatGPT.app → 子菜单立即出现「极高」；改回后消失。
 
 ## 8. 测试规程（改代码后必做，按成本从低到高）
 
