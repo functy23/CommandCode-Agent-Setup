@@ -24,6 +24,8 @@ Key 模式（单选）：
 import argparse
 import getpass
 import os
+import re
+import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -41,7 +43,7 @@ AGENTS = {
     },
     "claude-desktop": {
         "label": "Claude Desktop",
-        "desc": "CC Switch 直连模式（Anthropic Messages 网关；GOAT 不含 Claude，Pro+ 可用）",
+        "desc": "CC Switch 本地路由：模型映射进配置（默认）；GOAT 可用",
         "module": claude_desktop,
     },
     "codex": {
@@ -58,12 +60,18 @@ ESC = "\x1b"
 IS_TTY = sys.stdin.isatty() and sys.stdout.isatty()
 
 def _read_key():
-    """读取一个按键（含方向键/回车/空格），返回规范名。"""
+    """读取一个按键（含方向键/回车/空格），返回规范名。
+
+    整个交互期（checkbox/radiolist 循环）持续保持 raw+no-echo：
+    之前的实现每按一次键都 setraw→读→tcsetattr 恢复，ESC 序列的后两个字节
+    常在恢复后到达并被终端回显（屏幕出现 ^[[B 等字面量残留）。"""
     import termios, tty
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
+    if not _read_key._raw_saved:
+        _read_key._raw_saved = termios.tcgetattr(fd)
         tty.setraw(fd)
+        _read_key._raw_fd = fd
+    try:
         ch = sys.stdin.read(1)
         if ch == ESC:
             seq = sys.stdin.read(2)
@@ -72,14 +80,69 @@ def _read_key():
             return "enter"
         if ch == " ":
             return "space"
-        if ch in ("\x03",):   # Ctrl-C
+        if ch in ("\x03", "\x04"):   # Ctrl-C / Ctrl-D
+            _restore_termios()
             raise KeyboardInterrupt
         return ch.lower()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except OSError:
+        _restore_termios()
+        raise
+
+def _restore_termios():
+    if _read_key._raw_saved:
+        try:
+            termios.tcsetattr(_read_key._raw_fd, termios.TCSADRAIN, _read_key._raw_saved)
+        except Exception:
+            pass
+        _read_key._raw_saved = None
+
+_read_key._raw_saved = None
+
+def _end_interactive():
+    """交互结束后恢复终端状态（并补一个 \r\n，避免光标停在行中）。"""
+    _restore_termios()
+    sys.stdout.write("\r\n")
+    sys.stdout.flush()
+
+def _visible_width(s):
+    """ANSI 转义剔除后的可见宽度（中文按 2 列计）。"""
+    import unicodedata
+    s = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s)
+    w = 0
+    for ch in s:
+        w += 2 if unicodedata.east_asian_width(ch) in "FW" else 1
+    return w
+
+def _truncate_visible(s, max_w):
+    """把一行截断到可见宽度 max_w（保留 ANSI 码），防止终端折行破坏重绘光标数学。"""
+    if _visible_width(s) <= max_w:
+        return s
+    out, w = [], 0
+    i = 0
+    while i < len(s):
+        m = re.match(r"\x1b\[[0-9;]*[A-Za-z]", s[i:])
+        if m:  # ANSI 码不计宽度，原样保留
+            out.append(m.group(0)); i += len(m.group(0)); continue
+        import unicodedata
+        ch = s[i]
+        cw = 2 if unicodedata.east_asian_width(ch) in "FW" else 1
+        if w + cw > max_w - 1:
+            out.append("…")
+            break
+        out.append(ch); w += cw; i += 1
+    return "".join(out)
 
 def _render_choice(title, options, cursor, checked, multi, hint):
-    out = [f"{title}（↑↓ 移动，{'空格 勾选，' if multi else ''}回车 确认）\n"]
+    """原地重绘选项列表。title 由首次 print 输出（不参与重绘）。
+
+    关键约束：选项行若超过终端宽度会折行，一个逻辑行占多个物理行，
+    下一帧的光标回退 (\x1b[nA) 就对不准 —— 这是之前“提示重复出现/串行”的根因。
+    因此每行先按终端宽度截断；每帧先回退到列表首行并清屏到底（\x1b[J）。"""
+    try:
+        cols = shutil.get_terminal_size((100, 24)).columns
+    except Exception:
+        cols = 100
+    lines = []
     for i, (label, desc) in enumerate(options):
         mark = ("\x1b[36m❯\x1b[0m " if i == cursor else "  ")
         if multi:
@@ -89,13 +152,20 @@ def _render_choice(title, options, cursor, checked, multi, hint):
             line = f"{mark}\x1b[36m{label}\x1b[0m" if i == cursor else f"{mark}{label}"
         if desc:
             line += f"  \x1b[2m{desc}\x1b[0m"
-        out.append(line + "\n")
+        lines.append(_truncate_visible(line, cols - 1))
     if hint:
-        out.append(hint + "\n")
-    # 回退光标到列表首行，下一帧原地重绘
-    sys.stdout.write("\x1b[" + str(len(options) + (1 if hint else 0)) + "A\r")
-    sys.stdout.write("\x1b[J".join(out) + "\x1b[J")
+        lines.append(_truncate_visible(hint, cols - 1))
+    # 光标位于上一帧末行行尾（末行无换行）：回退 N 行到列表首行，清到屏尾后重绘
+    out = [f"\x1b[{_render_choice.drawn}A\r\x1b[J"] if _render_choice.drawn else [""]
+    _render_choice.drawn = len(lines)
+    # 【关键】行分隔必须用 \r\n 而非 \n：_read_key 期间终端处于 raw 态（ONLCR 已关），
+    # 裸 \n 只下移一行不回到列 0，每帧都会错位缩进——这正是提示重复/串行的根因。
+    # 末行不带换行（光标停行尾），中间行 \x1b[K 清行后 \r\n。
+    body = "\x1b[K\r\n".join(lines) + "\x1b[K"
+    sys.stdout.write("".join(out) + body)
     sys.stdout.flush()
+
+_render_choice.drawn = 0
 
 def checkbox(title, options, default=None):
     """多选复选框。options: [(label, desc)]，default: 勾选的下标集合。返回选中的下标列表（有序）。"""
@@ -104,27 +174,31 @@ def checkbox(title, options, default=None):
     checked = set(default or set())
     cursor = 0
     print(title + "（↑↓ 移动，空格 勾选/取消，a 全选/反选，回车 确认）")
+    _render_choice.drawn = 0
     _render_choice("", options, cursor, checked, True, "")
-    while True:
-        k = _read_key()
-        hint = ""
-        if k == "up":
-            cursor = (cursor - 1) % len(options)
-        elif k == "down":
-            cursor = (cursor + 1) % len(options)
-        elif k == "space":
-            checked.symmetric_difference_update({cursor})
-        elif k == "a":
-            if len(checked) == len(options):
-                checked.clear()
-            else:
-                checked = set(range(len(options)))
-        elif k == "enter":
-            if not checked:
-                _render_choice("", options, cursor, checked, True, "\x1b[31m至少选择一项，空格勾选后回车\x1b[0m")
-                continue
-            break
-        _render_choice("", options, cursor, checked, True, hint)
+    try:
+        while True:
+            k = _read_key()
+            hint = ""
+            if k == "up":
+                cursor = (cursor - 1) % len(options)
+            elif k == "down":
+                cursor = (cursor + 1) % len(options)
+            elif k == "space":
+                checked.symmetric_difference_update({cursor})
+            elif k == "a":
+                if len(checked) == len(options):
+                    checked.clear()
+                else:
+                    checked = set(range(len(options)))
+            elif k == "enter":
+                if not checked:
+                    _render_choice("", options, cursor, checked, True, "\x1b[31m至少选择一项，空格勾选后回车\x1b[0m")
+                    continue
+                break
+            _render_choice("", options, cursor, checked, True, hint)
+    finally:
+        _end_interactive()
     result = sorted(checked)
     names = "、".join(options[i][0] for i in result)
     print(f"✔ 已选择：{names}")
@@ -136,16 +210,20 @@ def radiolist(title, options, default=0):
         raise RuntimeError("非交互终端，无法显示单选框")
     cursor = default
     print(title + "（↑↓ 移动，回车 确认）")
+    _render_choice.drawn = 0
     _render_choice("", options, cursor, None, False, "")
-    while True:
-        k = _read_key()
-        if k == "up":
-            cursor = (cursor - 1) % len(options)
-        elif k == "down":
-            cursor = (cursor + 1) % len(options)
-        elif k == "enter":
-            break
-        _render_choice("", options, cursor, None, False, "")
+    try:
+        while True:
+            k = _read_key()
+            if k == "up":
+                cursor = (cursor - 1) % len(options)
+            elif k == "down":
+                cursor = (cursor + 1) % len(options)
+            elif k == "enter":
+                break
+            _render_choice("", options, cursor, None, False, "")
+    finally:
+        _end_interactive()
     print(f"✔ 已选择：{options[cursor][0]}")
     return cursor
 
