@@ -136,6 +136,30 @@ Claude Desktop（deploymentMode=3p）
 - ZCode 目标另有自己的规则表（`OUTPUT_RULES`/`REASONING_RULES`/`INPUT_RULES`，正则首条命中）与官网 SSR 页上下文抓取——这是旧仓库原逻辑，与 CC Switch 目录的口径**有意不同**（ZCode 元数据 schema 不同），勿合并。
 - CC Switch 重新生成磁盘 catalog 时自动补全其余字段（truncation_policy 等），脚本不管。
 
+### 7.1 【实测 2026-09-06】Codex /model UI 的档位显示策略（勿误判为数据缺失）
+
+用户曾报告「GLM-5.3 Flash 在 Codex 中思考等级没有最高选项，但 ZCode/DSH 有 max」。实测结论：**max 档一直存在且生效，只是 Codex TUI 从不显示 max 原名**。Codex 0.147 `/model` 界面的显示规则：
+
+- 任何模型的 `max` 档一律显示为 **「More reasoning…」**，副标题 `Max consumes usage limits faster`（OpenAI 把 max 定位成"隐藏彩蛋档"的 UI 设计，与 catalog 数据无关）；
+- `xhigh` 显示为 **「Extra high」**；
+- 当前选中的档位后缀 `(current)`。
+
+实际抓屏（100 列 pty）：
+
+```
+Select Reasoning Level for z-ai/glm-5.3-flash        ← catalog [low,high,max]
+  1. Low                        Fast responses with lighter reasoning
+  2. High                       Greater reasoning depth for complex problems
+› 3. More reasoning… (current)  Max consumes usage limits faster   ← 这就是 max
+
+Select Reasoning Level for gpt-5.6-sol               ← catalog [low..max] 5 档
+  1. Low / 2. Medium / 3. High
+  4. Extra high                  Extra high reasoning depth…
+› 5. More reasoning… (current)  Max consumes usage limits faster   ← max
+```
+
+与 ZCode/DSH 的差异本质：ZCode/DSH 的 UI 直接显示 variants 字面量（如 off/high/max），Codex TUI 做了展示层改名。数据链路（CC Switch DB → `~/.codex/cc-switch-model-catalog.json` → codex）与实际请求（`model_reasoning_effort = "max"` → 上游 200，`codex exec` 输出 `reasoning effort: max`）都已实测正确，**不要因此去改 catalog 档位数据**。
+
 ## 8. 测试规程（改代码后必做，按成本从低到高）
 
 ```bash
@@ -195,3 +219,4 @@ COMMANDCODE_API_KEY=<key> python3 setup.py --agents all --skip-probe --yes --ver
 | 2026-09-06（上午） | ccswitch-commandcode-setup 增加 Claude Desktop 支持（--app，direct 模式实测）；发现 auth.json key 不可信问题 |
 | 2026-09-06 | **三合一为本仓库 CommandCode-Agent-Setup**：common/ccswitch/zcode/codex/claude_desktop 模块化 + Inquirer 风格复选框/单选交互 + 共用/分别 Key 模式 + 探测共享（同 Key 只探一次）+ bootstrap 下载 modules/ 目录结构；pty 交互测试、副本库演练、实机三目标全通过；旧两仓库归档并在 README 标注指向本仓库 |
 | 2026-09-06 | **claude-desktop 改默认 proxy 本地路由模式**（官方模型清单消失、GOAT 可用）：角色档映射 opus→gpt-5.6-sol / sonnet→deepseek-v4-flash / haiku→glm-5.3-flash / fable→Kimi-K3，labelOverride=模型名；实证 profile 仅 UI switch 时写出（is_current 翻转/删 profile 重启均不重建），核验给一次性手动步骤；端到端 haiku→GLM、opus→Sol 路由 PONG 全通 |
+| 2026-09-06 | 新增 §7.1：实证 Codex /model UI 把 max 档显示为「More reasoning…」（非缺失）；max 在 catalog 中存在且实测生效，勿改档位数据 |
