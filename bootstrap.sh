@@ -39,6 +39,7 @@ FILES="setup.py modules/__init__.py modules/common.py modules/ccswitch.py module
 # ---- 下载到临时目录（保持 modules/ 目录结构）----
 TMP="$(mktemp -d /tmp/commandcode-agent-setup.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
+mkdir -p "${TMP}/modules"
 
 echo "→ 从 ${BASE_URL} 下载脚本 …"
 for f in $FILES; do
