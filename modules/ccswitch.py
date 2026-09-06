@@ -169,7 +169,7 @@ def finish_write(db, live, no_restart, targets):
                 failed.append("claude-desktop")
     if failed:
         C.warn("接管核验未通过：" + "、".join(failed) +
-               "。可查看 ~/.cc-switch/logs/cc-switch.log 或回滚（见上方 .bak 文件）。")
+               "。请按上方提示操作；配置本身已写入，回滚可用上方 .bak 文件。")
         return False
     return True
 
@@ -208,50 +208,66 @@ def codex_post_verify(entries):
 
 # ---------------- claude-desktop 核验 ----------------
 
-def claude_desktop_verify(wait_secs=30):
-    """claude-desktop direct 模式核验：CC Switch 启动后会异步写 3P profile（实测约 10s 延迟），
-    因此带重试窗口轮询 Claude-3p 目录。"""
-    ok = True
+def claude_desktop_verify(wait_secs=30, expect_mode="proxy"):
+    """claude-desktop 核验：CC Switch 仅在 UI 切换提供商时写 3P profile（【实测】无 CLI/deeplink/
+    启动自动补跑；官方文案即"重新切换当前供应商可修复"）。脚本写库后 profile 可能仍是旧内容——
+    轮询一小段时间，若未生效则给出明确的一次性手动步骤，不判失败。"""
     C.log("→ 核验 Claude Desktop 接管结果 …")
     lib = os.path.join(HOME, "Library", "Application Support", "Claude-3p", "configLibrary")
     meta_p = os.path.join(lib, "_meta.json")
+    profile_p = os.path.join(lib, "00000000-0000-4000-8000-000000157210.json")
+
+    def _read_profile():
+        try:
+            return json.load(open(profile_p, encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
     data = None
     deadline = time.time() + wait_secs
-    while True:  # 轮询直到 profile 出现且指向 CommandCode，或超时
-        if os.path.exists(meta_p):
-            try:
-                meta = json.load(open(meta_p, encoding="utf-8"))
-                applied = meta.get("appliedId")
-                cand = os.path.join(lib, f"{applied}.json") if applied else None
-                if cand and os.path.exists(cand):
-                    d = json.load(open(cand, encoding="utf-8"))
-                    if "commandcode.ai" in d.get("inferenceGatewayBaseUrl", ""):
-                        data = d
-                        break
-            except (json.JSONDecodeError, OSError):
-                pass
-        if time.time() >= deadline:
+    while time.time() < deadline:  # 兜底轮询（万一应用侧异步写入）
+        data = _read_profile()
+        if data and _profile_matches(data, expect_mode):
             break
         time.sleep(2)
+    data = data or _read_profile()
+
     if data is None:
-        C.warn(f"等待 {wait_secs}s 内未见指向 CommandCode 的 3P profile（{meta_p}）。"
-               "若 CC Switch 界面里 CommandCode（Claude Desktop）已选中，手动切换一次即可写出。")
+        C.warn(f"未见 3P profile（{profile_p}）。请在 CC Switch 里切换一次 Claude Desktop 提供商以写出。")
         return False
+
     base = data.get("inferenceGatewayBaseUrl", "")
-    C.log(f"  ✓ 3P profile 已应用：inferenceGatewayBaseUrl={base}")
-    if not base.rstrip("/").endswith("/provider"):
-        C.warn(f"3P profile 指向 {base}，预期为 https://api.commandcode.ai/provider。")
-        ok = False
+    if _profile_matches(data, expect_mode):
+        C.log(f"  ✓ 3P profile 已应用：inferenceGatewayBaseUrl={base}")
+        if data.get("inferenceModels"):
+            names = [m if isinstance(m, str) else m.get("name", "?") for m in data["inferenceModels"]]
+            C.log(f"  ✓ 模型菜单（inferenceModels）：{', '.join(names)}")
+    else:
+        if expect_mode == "proxy":
+            C.warn(f"3P profile 仍是旧内容（base={base}）。CC Switch 仅在 UI 切换提供商时重写 profile："
+                   "请打开 CC Switch → Claude Desktop 页 → 点一下 CommandCode 卡片（重新切换），"
+                   "profile 会立即变为本机代理地址并只含映射模型。")
+        else:
+            C.warn(f"3P profile 仍是旧内容（base={base}）。请打开 CC Switch → Claude Desktop 页 →"
+                   "点一下 CommandCode 卡片（重新切换）。")
+        return False
+
     cfg = os.path.join(HOME, "Library", "Application Support", "Claude", "claude_desktop_config.json")
     if os.path.exists(cfg):
         try:
             mode = json.load(open(cfg, encoding="utf-8")).get("deploymentMode")
             if mode != "3p":
                 C.warn(f"claude_desktop_config.json 的 deploymentMode={mode}（应为 3p）—— 请在 Claude Desktop 设置里切换到第三方部署模式。")
-                ok = False
         except (json.JSONDecodeError, OSError) as e:
             C.warn(f"{cfg} 读取失败：{e}")
-    return ok
+    return True
+
+
+def _profile_matches(data, expect_mode):
+    base = data.get("inferenceGatewayBaseUrl", "")
+    if expect_mode == "proxy":
+        return base.rstrip("/").endswith("/claude-desktop")
+    return "commandcode.ai" in base
 
 # ---------------- codex 冒烟测试 ----------------
 

@@ -233,6 +233,10 @@ def parse_args():
     ap.add_argument("--name", default=C.DEFAULT_PROVIDER_NAME, help=f"提供商名称（默认 {C.DEFAULT_PROVIDER_NAME}）")
     ap.add_argument("--include", action="append", default=[], metavar="SLUG", help="额外强制收录的模型 slug（可重复）")
     ap.add_argument("--skip-probe", action="store_true", help="跳过探测，直接收录目录里除 Claude 外的全部模型")
+    ap.add_argument("--cd-mode", choices=["proxy", "direct"], default="proxy",
+                    help="Claude Desktop 接入模式：proxy（默认，模型映射进配置、官方清单消失、GOAT 可用）/ direct（直连，GOAT 会报 403）")
+    ap.add_argument("--cd-model", action="append", default=[], metavar="ROLE=SLUG",
+                    help="proxy 模式角色映射覆盖，如 --cd-model opus=zai-org/GLM-5.3（角色：opus/sonnet/haiku/fable，可重复）")
     ap.add_argument("--db", help="CC Switch 数据库路径（默认 ~/.cc-switch/cc-switch.db；传其他路径用于演练，不触碰真实库）")
     ap.add_argument("--dry-run", action="store_true", help="只预览，不做任何修改")
     ap.add_argument("--no-restart", action="store_true", help="写库后不重启 CC Switch")
@@ -299,7 +303,8 @@ def main():
     for a in agents:
         info = validated[keys[a]]
         ma = ModArgs()
-        for f in ("dry_run", "yes", "name", "include", "skip_probe", "model", "verify", "no_restart", "plan", "db"):
+        for f in ("dry_run", "yes", "name", "include", "skip_probe", "model", "verify", "no_restart", "plan", "db",
+                  "cd_mode", "cd_model"):
             setattr(ma, f, getattr(args, f, None))
         if a == "codex":
             entries, excluded, notes = get_shared(keys[a], info["upstream"])
@@ -308,7 +313,9 @@ def main():
             entries, excluded, notes = get_shared(keys[a], info["upstream"])
             ok = zcode.run(keys[a], info["upstream"], ma, shared_entries=(entries, excluded, notes))
         else:
-            ok = claude_desktop.run(keys[a], info["upstream"], ma)
+            # claude-desktop：proxy 模式也需要探测收录（映射目标校验）
+            entries, excluded, notes = get_shared(keys[a], info["upstream"])
+            ok = claude_desktop.run(keys[a], info["upstream"], ma, shared_entries=(entries, excluded, notes))
         results[a] = ok
 
     failed = [AGENTS[a]["label"] for a, ok in results.items() if not ok]

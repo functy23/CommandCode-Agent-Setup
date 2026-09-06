@@ -67,6 +67,28 @@ Codex CLI（vendor 二进制，不在 PATH；wire_api=responses）
 
 ### 4.3 Claude Desktop【实测 2026-09-06】
 
+两种模式（`--cd-mode`，**默认 proxy**）：
+
+**proxy 本地路由模式（默认，推荐）**——模型清单写进配置文件，等同 Codex 思路：
+
+```
+Claude Desktop（deploymentMode=3p，模型菜单来自 profile.inferenceModels）
+  → POST http://127.0.0.1:15721/claude-desktop/v1/messages（bearer，token=CC Switch 生成的 ccs-*）
+  → map_proxy_request_model：claude-* route_id 映射为真实上游模型（角色回落 + [1m] 剥离）
+  → apiFormat=openai_chat：Anthropic→OpenAI 转换
+  → POST https://api.commandcode.ai/provider/v1/chat/completions
+```
+
+- DB 行 `meta`：`{"claudeDesktopMode":"proxy","apiFormat":"openai_chat","claudeDesktopModelRoutes":{route_id:{model,labelOverride?,supports1m?}}}`
+  - `route_id` 必须 claude-* 或 anthropic/claude-*（CC Switch `DEFAULT_PROXY_ROUTES`：claude-sonnet-5/claude-opus-5/claude-haiku-4-5/claude-fable-5）；proxy 模式 `model` 可为任意上游模型（direct 模式禁止映射）
+  - `settings_config` = `env`（同 direct）+ `modelCatalog`（映射后四档，供用量统计）
+  - **默认角色映射（四档 → 四个不同 GOAT 模型，菜单像原生列表）**：opus→`gpt-5.6-sol`、sonnet→`deepseek/deepseek-v4-flash`、haiku→`z-ai/glm-5.3-flash`、fable→`moonshotai/Kimi-K3`；`labelOverride` 直接用底层模型名（GPT-5.6 Sol / DeepSeek V4 Flash / GLM-5.3 Flash / Kimi K3）。`--cd-model 角色=slug` 可覆盖，映射目标必须在探测收录内
+- CC Switch 接管后写 3P profile：`inferenceGatewayBaseUrl=http://127.0.0.1:15721/claude-desktop`、`inferenceGatewayApiKey=ccs-*`（存 DB settings 表）、`inferenceModels`=映射列表
+- `/claude-desktop/v1/models` 只返回映射项 → **模型菜单由配置决定，官方模型清单消失**，官方模型启动探测 403 报错消除；GOAT 可用
+- 【实测端到端】`claude-opus-5` 请求 → 上游 `deepseek/deepseek-v4-flash`（chat/completions）→ 正常返回
+
+**direct 直连模式（`--cd-mode direct`，适合含 Claude 的套餐 Pro+）**：
+
 ```
 Claude Desktop（deploymentMode=3p）
   → 读 ~/Library/Application Support/Claude-3p/configLibrary/<appliedId>.json
@@ -76,9 +98,9 @@ Claude Desktop（deploymentMode=3p）
 
 - direct 模式映射：DB 行 `env.ANTHROPIC_BASE_URL` → `inferenceGatewayBaseUrl`；`env.ANTHROPIC_AUTH_TOKEN` → `inferenceGatewayApiKey`；外加固定字段 `inferenceProvider=gateway`、`inferenceGatewayAuthScheme=bearer`、`coworkEgressAllowedHosts=["*"]`、`disableDeploymentModeChooser=true`
 - **baseURL 必须不含端点路径**（`https://api.commandcode.ai/provider`，网关自己拼 `/v1/messages`）；上游 `/v1/messages` 接受 Bearer 与 x-api-key（用 OSS 模型名探测返回 400 model-not-supported 而非 401，即鉴权通过）
-- **CC Switch 写 3P profile 是启动后异步的（实测约 10s）** → 核验必须带重试窗口（当前 30s 轮询）
-- `claude_desktop_config.json` 的 `deploymentMode` 必须为 `"3p"`（用户在 Claude Desktop 设置里切；CC Switch 不改这个键）
-- GOAT 下 Claude 全系 403 `MODEL_NOT_IN_PLAN`（haiku/sonnet→Pro+，opus/fable→Provider+）。用户可见症状：Claude Desktop 启动提示「Couldn't sign in to 网关 … Gateway rejected the configured credential (HTTP 403) … probedModel: claude-haiku-4-5-20251001」——**这不是 Key 错误**，README 已解释
+- GOAT 下 Claude 全系 403 `MODEL_NOT_IN_PLAN`（haiku/sonnet→Pro+，opus/fable→Provider+）。用户可见症状：Claude Desktop 启动提示「Couldn't sign in to 网关 … Gateway rejected the configured credential (HTTP 403) … probedModel: claude-haiku-4-5-20251001」——**这不是 Key 错误**；proxy 模式可消除
+
+**【关键坑】3P profile 只在 UI 切换提供商时写出**：CC Switch 源码（`proxy_config` 表 CHECK 约束 + `supports_local_proxy()` 不含 claude-desktop）决定 claude-desktop **不参与代理启动恢复**，也无 CLI/deeplink 触发 switch（deeplink app 白名单不含 claude-desktop；is_current 翻转重启无效、删 profile 重启也不重建）。脚本写完 DB 后 profile 可能仍是旧内容——核验检测到不一致时给出一次性手动步骤：「打开 CC Switch → Claude Desktop 页 → 点一下 CommandCode 卡片（重新切换）」；官方文案同义「重新切换当前供应商可修复」。`claude_desktop_config.json` 的 `deploymentMode` 必须为 `"3p"`（用户在 Claude Desktop 设置里切）
 
 ## 5. CC Switch 数据库写入规范（最关键的坑）
 
@@ -172,3 +194,4 @@ COMMANDCODE_API_KEY=<key> python3 setup.py --agents all --skip-probe --yes --ver
 | 2026-08-29 | ZCode-CommandCode-Setup 诞生（ZCode 目标，探测式 + 官网上下文）；同日手工打通 Codex→CC Switch→CommandCode 链路并项目化为 ccswitch-commandcode-setup |
 | 2026-09-06（上午） | ccswitch-commandcode-setup 增加 Claude Desktop 支持（--app，direct 模式实测）；发现 auth.json key 不可信问题 |
 | 2026-09-06 | **三合一为本仓库 CommandCode-Agent-Setup**：common/ccswitch/zcode/codex/claude_desktop 模块化 + Inquirer 风格复选框/单选交互 + 共用/分别 Key 模式 + 探测共享（同 Key 只探一次）+ bootstrap 下载 modules/ 目录结构；pty 交互测试、副本库演练、实机三目标全通过；旧两仓库归档并在 README 标注指向本仓库 |
+| 2026-09-06 | **claude-desktop 改默认 proxy 本地路由模式**（官方模型清单消失、GOAT 可用）：角色档映射 opus→gpt-5.6-sol / sonnet→deepseek-v4-flash / haiku→glm-5.3-flash / fable→Kimi-K3，labelOverride=模型名；实证 profile 仅 UI switch 时写出（is_current 翻转/删 profile 重启均不重建），核验给一次性手动步骤；端到端 haiku→GLM、opus→Sol 路由 PONG 全通 |
