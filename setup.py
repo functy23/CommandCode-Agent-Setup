@@ -206,11 +206,15 @@ def ask_keys(args, agents):
         for a in agents:
             keys[a] = key
     else:  # separate
+        env_names = {"zcode": "ZCODE_COMMANDCODE_KEY",
+                     "claude-desktop": "CLAUDE_DESKTOP_COMMANDCODE_KEY",
+                     "codex": "CODEX_COMMANDCODE_KEY"}
         for a in agents:
-            key = getpass.getpass(f"请输入 {AGENTS[a]['label']} 使用的 CommandCode API Key（user_…，不回显）: ").strip() \
-                if IS_TTY else None
+            key = os.environ.get(env_names[a]) if not IS_TTY else None
+            if not key and IS_TTY:
+                key = getpass.getpass(f"请输入 {AGENTS[a]['label']} 使用的 CommandCode API Key（user_…，不回显）: ").strip()
             if not key:
-                C.die(f"未提供 {AGENTS[a]['label']} 的 Key。")
+                C.die(f"未提供 {AGENTS[a]['label']} 的 Key（交互输入或环境变量 {env_names[a]}）。")
             keys[a] = key
     for a, k in keys.items():
         if not k.startswith("user_"):
