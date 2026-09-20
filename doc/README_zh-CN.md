@@ -2,7 +2,7 @@
 
 # 🔧 CommandCode Agent Setup
 
-**一键把 CommandCode 订阅配置进 ZCode、Claude Desktop 与 Codex CLI —— 仅限 macOS。**
+**一键把 CommandCode 订阅配置进 ZCode 与 Codex CLI —— 仅限 macOS。**
 
 [![CommandCode-Agent-Setup](https://img.shields.io/badge/CommandCode-Agent-Setup-CCAS-orange.svg)](https://github.com/functy23/CommandCode-Agent-Setup)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)

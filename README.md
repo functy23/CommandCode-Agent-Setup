@@ -2,7 +2,7 @@
 
 # 🔧 CommandCode Agent Setup
 
-**One-liner setup that wires your CommandCode subscription into ZCode, Claude Desktop and Codex CLI — macOS only.**
+**One-liner setup that wires your CommandCode subscription into ZCode and Codex CLI — macOS only.**
 
 [![CommandCode-Agent-Setup](https://img.shields.io/badge/CommandCode-Agent-Setup-CCAS-orange.svg)](https://github.com/functy23/CommandCode-Agent-Setup)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
