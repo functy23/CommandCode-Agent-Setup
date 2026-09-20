@@ -44,7 +44,7 @@ def build_settings_config(key, entries, model, effort):
 
 
 def run(key, upstream, args, shared_entries=None):
-    """Codex 目标主流程。shared_entries 非空时复用已探测的收录结果。"""
+    """Codex 目标主流程。shared_entries 非空时复用已拉取的目录。"""
     C.log(f"\n===== 目标：Codex CLI（经 CC Switch 代理） =====")
     if shared_entries is not None:
         entries, excluded, notes = shared_entries

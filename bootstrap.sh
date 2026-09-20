@@ -34,7 +34,7 @@ die() { echo "❌ $1" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || die "未找到 python3：请先安装 Xcode Command Line Tools（xcode-select --install）"
 command -v curl >/dev/null 2>&1 || die "未找到 curl。"
 
-FILES="setup.py modules/__init__.py modules/common.py modules/ccswitch.py modules/zcode.py modules/codex.py modules/claude_desktop.py"
+FILES="setup.py modules/__init__.py modules/common.py modules/ccswitch.py modules/zcode.py modules/codex.py modules/login.py"
 
 # ---- 下载到临时目录（保持 modules/ 目录结构）----
 TMP="$(mktemp -d /tmp/commandcode-agent-setup.XXXXXX)"

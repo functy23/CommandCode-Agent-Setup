@@ -5,20 +5,21 @@ CommandCode-Agent-Setup —— 一键把 CommandCode 订阅配置进多个 AI Ag
 
 支持目标（复选框多选）：
   • ZCode           —— 写 ~/.zcode/v2/config.json（openai-compatible provider）
-  • Claude Desktop  —— 经 CC Switch 直连模式（Anthropic Messages 网关）
   • Codex CLI       —— 经 CC Switch 代理（responses→chat 转换）
 
-Key 模式（单选）：
-  • 共用 Key —— 所有选中 Agent 使用同一个 Key
-  • 分别配置 —— 按顺序为每个选中 Agent 单独输入 Key
+凭证来源（单选）：
+  • 网页登录 —— 打开 CommandCode Studio，登录后自动回填 Key
+  • 手动输入 —— 粘贴 user_ 开头的 API Key（共用 / 分别配置）
+  • 本机已有凭证 —— 读取 ~/.commandcode/auth.json 等
 
 最低 GOAT 套餐（不支持 Go）。仅依赖 Python 3 标准库。
 
 用法：
   python3 setup.py                          # 全交互
   python3 setup.py --agents zcode,codex --key-mode shared
+  python3 setup.py --agents all --login --yes --verify
   python3 setup.py --agents all --key-mode shared --key user_xxx --yes --verify
-  python3 setup.py --dry-run --skip-probe   # 机器测试组合
+  python3 setup.py --dry-run                # 机器测试组合
 """
 
 import argparse
@@ -31,7 +32,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from modules import common as C
-from modules import zcode, codex, claude_desktop
+from modules import zcode, codex, login as L
 
 # ---------------- Agent 注册表 ----------------
 
@@ -41,18 +42,13 @@ AGENTS = {
         "desc": "写入 ~/.zcode/v2/config.json，模型选择器直接可见",
         "module": zcode,
     },
-    "claude-desktop": {
-        "label": "Claude Desktop",
-        "desc": "CC Switch 本地路由：模型映射进配置（默认）；GOAT 可用",
-        "module": claude_desktop,
-    },
     "codex": {
         "label": "Codex CLI",
         "desc": "经 CC Switch 代理（responses→chat 转换），含思考档位标注",
         "module": codex,
     },
 }
-ORDER = ["zcode", "claude-desktop", "codex"]  # 显示与输入顺序
+ORDER = ["zcode", "codex"]  # 显示与输入顺序
 
 # ---------------- 终端复选框 / 单选（Inquirer 风格，方向键 + 空格） ----------------
 
@@ -88,9 +84,19 @@ def _read_key():
         _restore_termios()
         raise
 
+def _enter_raw():
+    """交互控件首绘前进入 raw 态，避免第一帧 cooked、后续 raw 的行距不一致。"""
+    import termios, tty
+    fd = sys.stdin.fileno()
+    if not _read_key._raw_saved:
+        _read_key._raw_saved = termios.tcgetattr(fd)
+        tty.setraw(fd)
+        _read_key._raw_fd = fd
+
 def _restore_termios():
     if _read_key._raw_saved:
         try:
+            import termios
             termios.tcsetattr(_read_key._raw_fd, termios.TCSADRAIN, _read_key._raw_saved)
         except Exception:
             pass
@@ -155,8 +161,15 @@ def _render_choice(title, options, cursor, checked, multi, hint):
         lines.append(_truncate_visible(line, cols - 1))
     if hint:
         lines.append(_truncate_visible(hint, cols - 1))
-    # 光标位于上一帧末行行尾（末行无换行）：回退 N 行到列表首行，清到屏尾后重绘
-    out = [f"\x1b[{_render_choice.drawn}A\r\x1b[J"] if _render_choice.drawn else [""]
+    # 光标停在末行行尾（末行无换行），已经位于第 drawn 行上，
+    # 回退 drawn-1 行才到列表首行。以前用 drawn 会多退一行，
+    # 再加 \x1b[J 就把标题/横幅随着每次按键一行行吞掉。
+    # CSI 0A 在部分终端会被当成 1A，drawn==1 时只清当前行、不要发 CUU。
+    if _render_choice.drawn:
+        n = _render_choice.drawn - 1
+        out = [f"\x1b[{n}A\r\x1b[J"] if n else ["\r\x1b[J"]
+    else:
+        out = [""]
     _render_choice.drawn = len(lines)
     # 【关键】行分隔必须用 \r\n 而非 \n：_read_key 期间终端处于 raw 态（ONLCR 已关），
     # 裸 \n 只下移一行不回到列 0，每帧都会错位缩进——这正是提示重复/串行的根因。
@@ -175,6 +188,7 @@ def checkbox(title, options, default=None):
     cursor = 0
     print(title + "（↑↓ 移动，空格 勾选/取消，a 全选/反选，回车 确认）")
     _render_choice.drawn = 0
+    _enter_raw()
     _render_choice("", options, cursor, checked, True, "")
     try:
         while True:
@@ -211,6 +225,7 @@ def radiolist(title, options, default=0):
     cursor = default
     print(title + "（↑↓ 移动，回车 确认）")
     _render_choice.drawn = 0
+    _enter_raw()
     _render_choice("", options, cursor, None, False, "")
     try:
         while True:
@@ -246,27 +261,75 @@ def ask_agents(args):
         # 保持展示顺序
         return [a for a in ORDER if a in seen]
     if not IS_TTY:
-        C.die("非交互环境请用 --agents zcode,codex,claude-desktop（或 all）指定目标。")
+        C.die("非交互环境请用 --agents zcode,codex（或 all）指定目标。")
     idx = checkbox("选择要配置的 Agent", [(AGENTS[a]["label"], AGENTS[a]["desc"]) for a in ORDER],
                    default=set(range(len(ORDER))))
     return [ORDER[i] for i in idx]
 
+def _warn_key_prefix(agents, keys):
+    for a, k in keys.items():
+        if not k.startswith("user_"):
+            C.warn(f"{AGENTS[a]['label']} 的 Key 不是 user_ 前缀，请确认这是 CommandCode 的 API Key。")
+
+def _keys_shared(agents, key):
+    if not key:
+        C.die("未提供 Key。")
+    keys = {a: key for a in agents}
+    _warn_key_prefix(agents, keys)
+    return keys
+
 def ask_keys(args, agents):
-    """确定每个 Agent 的 Key。返回 {agent_slug: key}。"""
-    keys = {}
-    if args.key:
-        for a in agents:
-            keys[a] = args.key
-        return keys
+    """确定每个 Agent 的 Key。返回 {agent_slug: key}。
+
+    凭证来源优先级：
+      --key / COMMANDCODE_API_KEY → 直接共用
+      --login → 网页登录
+      --auth-file → 本机凭证
+      交互：网页登录 / 手动输入 / 本机已有凭证
+    """
     env_key = os.environ.get("COMMANDCODE_API_KEY")
+    if args.key:
+        return _keys_shared(agents, args.key)
+
+    source = None
+    if args.login:
+        source = "web"
+    elif getattr(args, "auth_file", False):
+        source = "file"
+    if source is None and env_key:
+        C.log("使用环境变量 COMMANDCODE_API_KEY 作为共用 Key。")
+        return _keys_shared(agents, env_key)
+
+    if source is None:
+        if not IS_TTY:
+            C.die("非交互环境请用 --login、--key、--auth-file 或环境变量 COMMANDCODE_API_KEY 提供 Key。")
+        idx = radiolist("如何提供 API Key", [
+            ("网页登录", "打开 CommandCode Studio，登录后自动回填"),
+            ("手动输入", "粘贴 user_ 开头的 API Key"),
+            ("本机已有凭证", "~/.commandcode/auth.json 等"),
+        ])
+        source = ("web", "paste", "file")[idx]
+
+    if source == "web":
+        if args.key_mode == "separate":
+            C.warn("网页登录只会拿到一个 Key，已按共用处理（忽略 --key-mode separate）。")
+        return _keys_shared(agents, L.browser_login())
+
+    if source == "file":
+        key, path = L.read_existing_key()
+        if not key:
+            C.die("未找到本机凭证（~/.commandcode/auth.json、~/.pi/agent/auth.json、~/.omp/agent/auth.json）。"
+                  "请改用网页登录或手动输入。")
+        C.log(f"使用本机凭证：{path}")
+        return _keys_shared(agents, key)
+
+    # 手动输入：沿用共用 / 分别配置
     mode = args.key_mode
     if mode is None:
         if not IS_TTY:
-            if env_key:
-                mode = "shared"
-                C.log("使用环境变量 COMMANDCODE_API_KEY 作为共用 Key。")
-            else:
-                C.die("非交互环境请用 --key-mode shared|separate 与 --key（或环境变量）提供 Key。")
+            C.die("非交互环境请用 --key-mode shared|separate 与 --key 提供 Key。")
+        if len(agents) == 1:
+            mode = "shared"
         else:
             idx = radiolist("Key 配置方式", [
                 ("共用 Key", "所有选中的 Agent 使用同一个 Key"),
@@ -274,47 +337,39 @@ def ask_keys(args, agents):
             ])
             mode = "shared" if idx == 0 else "separate"
     if mode == "shared":
-        key = env_key or args.key
+        if not IS_TTY:
+            C.die("非交互环境请用 --key 或环境变量 COMMANDCODE_API_KEY 提供 Key。")
+        key = getpass.getpass("请输入共用的 CommandCode API Key（user_…，输入不回显）: ").strip()
+        return _keys_shared(agents, key)
+
+    env_names = {"zcode": "ZCODE_COMMANDCODE_KEY", "codex": "CODEX_COMMANDCODE_KEY"}
+    keys = {}
+    for a in agents:
+        key = os.environ.get(env_names[a]) if not IS_TTY else None
+        if not key and IS_TTY:
+            key = getpass.getpass(f"请输入 {AGENTS[a]['label']} 使用的 CommandCode API Key（user_…，不回显）: ").strip()
         if not key:
-            if not IS_TTY:
-                C.die("非交互环境请用 --key 或环境变量 COMMANDCODE_API_KEY 提供 Key。")
-            key = getpass.getpass(f"请输入共用的 CommandCode API Key（user_…，输入不回显）: ").strip()
-        if not key:
-            C.die("未提供 Key。")
-        for a in agents:
-            keys[a] = key
-    else:  # separate
-        env_names = {"zcode": "ZCODE_COMMANDCODE_KEY",
-                     "claude-desktop": "CLAUDE_DESKTOP_COMMANDCODE_KEY",
-                     "codex": "CODEX_COMMANDCODE_KEY"}
-        for a in agents:
-            key = os.environ.get(env_names[a]) if not IS_TTY else None
-            if not key and IS_TTY:
-                key = getpass.getpass(f"请输入 {AGENTS[a]['label']} 使用的 CommandCode API Key（user_…，不回显）: ").strip()
-            if not key:
-                C.die(f"未提供 {AGENTS[a]['label']} 的 Key（交互输入或环境变量 {env_names[a]}）。")
-            keys[a] = key
-    for a, k in keys.items():
-        if not k.startswith("user_"):
-            C.warn(f"{AGENTS[a]['label']} 的 Key 不是 user_ 前缀，请确认这是 CommandCode 的 API Key。")
+            C.die(f"未提供 {AGENTS[a]['label']} 的 Key（交互输入或环境变量 {env_names[a]}）。")
+        keys[a] = key
+    _warn_key_prefix(agents, keys)
     return keys
 
 # ---------------- 主流程 ----------------
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="CommandCode → 多 Agent 一键配置（ZCode / Claude Desktop / Codex，仅限 macOS）")
-    ap.add_argument("--agents", help="目标 Agent（逗号分隔：zcode,claude-desktop,codex 或 all）；缺省弹复选框")
-    ap.add_argument("--key-mode", choices=["shared", "separate"], help="Key 模式；缺省弹单选框")
+    ap = argparse.ArgumentParser(description="CommandCode → 多 Agent 一键配置（ZCode / Codex，仅限 macOS）")
+    ap.add_argument("--agents", help="目标 Agent（逗号分隔：zcode,codex 或 all）；缺省弹复选框")
+    ap.add_argument("--key-mode", choices=["shared", "separate"], help="手动输入时的 Key 模式；缺省弹单选框")
     ap.add_argument("-k", "--key", help="CommandCode API Key（共用模式下全部 Agent 使用；也可用环境变量 COMMANDCODE_API_KEY）")
+    ap.add_argument("--login", action="store_true", help="网页登录：打开 CommandCode Studio，登录后自动回填 Key")
+    ap.add_argument("--auth-file", action="store_true",
+                    help="使用本机已有凭证（~/.commandcode/auth.json、~/.pi/agent/auth.json、~/.omp/agent/auth.json）")
     ap.add_argument("--plan", choices=["goat", "pro", "provider"], help="跳过订阅自动识别，强制按该套餐档位（闸门用）")
     ap.add_argument("-m", "--model", help=f"Codex 默认模型 slug（默认 {C.DEFAULT_MODEL}）")
     ap.add_argument("--name", default=C.DEFAULT_PROVIDER_NAME, help=f"提供商名称（默认 {C.DEFAULT_PROVIDER_NAME}）")
     ap.add_argument("--include", action="append", default=[], metavar="SLUG", help="额外强制收录的模型 slug（可重复）")
-    ap.add_argument("--skip-probe", action="store_true", help="跳过探测，直接收录目录里除 Claude 外的全部模型")
-    ap.add_argument("--cd-mode", choices=["proxy", "direct"], default="proxy",
-                    help="Claude Desktop 接入模式：proxy（默认，模型映射进配置、官方清单消失、GOAT 可用）/ direct（直连，GOAT 会报 403）")
-    ap.add_argument("--cd-model", action="append", default=[], metavar="ROLE=SLUG",
-                    help="proxy 模式角色映射覆盖，如 --cd-model opus=zai-org/GLM-5.3（角色：opus/sonnet/haiku/fable，可重复）")
+    ap.add_argument("--skip-probe", action="store_true",
+                    help="已废弃：模型列表改为公开目录，不再逐模型探测（保留此开关以免旧命令行报错）")
     ap.add_argument("--db", help="CC Switch 数据库路径（默认 ~/.cc-switch/cc-switch.db；传其他路径用于演练，不触碰真实库）")
     ap.add_argument("--dry-run", action="store_true", help="只预览，不做任何修改")
     ap.add_argument("--no-restart", action="store_true", help="写库后不重启 CC Switch")
@@ -336,8 +391,8 @@ def main():
         C.die("本脚本仅支持 macOS。")
 
     print("=" * 68)
-    print(" CommandCode → 多 Agent 一键配置（ZCode / Claude Desktop / Codex）")
-    print(" 最低 GOAT 套餐；Claude 系模型仅 Pro+ 套餐可用（会被自动跳过并说明原因）")
+    print(" CommandCode → 多 Agent 一键配置（ZCode / Codex）")
+    print(" 最低 GOAT 套餐；模型列表来自公开目录（Claude 系自动跳过）")
     print("=" * 68)
 
     agents = ask_agents(args)
@@ -361,12 +416,12 @@ def main():
             if plan is None:
                 C.warn("无法识别订阅套餐（订阅接口失败或无数据）。")
                 if not args.yes:
-                    if not sys.stdin.isatty() or input("仍要继续（以探测结果为准）? [y/N] ").strip().lower() not in ("y", "yes"):
+                    if not sys.stdin.isatty() or input("仍要继续（以公开目录为准）? [y/N] ").strip().lower() not in ("y", "yes"):
                         C.die("已取消。也可用 --plan goat 强制按 GOAT 处理。")
             C.log(f"✓ Key 有效（账户：{account or '未知'}），订阅 planId={plan_id or '未知'} → 套餐档位：{plan or '未知'}")
             validated[k] = {"upstream": upstream, "plan": plan}
 
-    # 共享探测：同 Key 的 codex/zcode 目标复用同一份收录结果
+    # 共享目录：同 Key 的 zcode/codex 目标复用同一份收录结果
     shared_probe = {}
 
     def get_shared(key, upstream):
@@ -381,19 +436,15 @@ def main():
     for a in agents:
         info = validated[keys[a]]
         ma = ModArgs()
-        for f in ("dry_run", "yes", "name", "include", "skip_probe", "model", "verify", "no_restart", "plan", "db",
-                  "cd_mode", "cd_model"):
+        for f in ("dry_run", "yes", "name", "include", "skip_probe", "model", "verify", "no_restart", "plan", "db"):
             setattr(ma, f, getattr(args, f, None))
+        entries, excluded, notes = get_shared(keys[a], info["upstream"])
         if a == "codex":
-            entries, excluded, notes = get_shared(keys[a], info["upstream"])
             ok = codex.run(keys[a], info["upstream"], ma, shared_entries=(entries, excluded, notes))
         elif a == "zcode":
-            entries, excluded, notes = get_shared(keys[a], info["upstream"])
             ok = zcode.run(keys[a], info["upstream"], ma, shared_entries=(entries, excluded, notes))
         else:
-            # claude-desktop：proxy 模式也需要探测收录（映射目标校验）
-            entries, excluded, notes = get_shared(keys[a], info["upstream"])
-            ok = claude_desktop.run(keys[a], info["upstream"], ma, shared_entries=(entries, excluded, notes))
+            C.die(f"未知目标：{a}")
         results[a] = ok
 
     failed = [AGENTS[a]["label"] for a, ok in results.items() if not ok]

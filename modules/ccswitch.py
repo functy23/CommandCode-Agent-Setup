@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CC Switch 共享设施：进程控制、数据库写入、双核验。
-
-codex 与 claude_desktop 两个目标模块共用。
-"""
+"""CC Switch 共享设施：进程控制、数据库写入、codex 核验与冒烟。"""
 
 import glob
 import json
@@ -122,7 +119,6 @@ def write_provider(db, app_type, name, sc_json, meta_json, upstream_url, make_cu
             conn.execute("UPDATE providers SET is_current=0 WHERE app_type=?", (app_type,))
             conn.execute("UPDATE providers SET is_current=1 WHERE id=? AND app_type=?", (pid, app_type))
         if app_type == "codex":
-            # codex 需要 proxy_config 开启接管；claude-desktop 是 direct 模式，不走代理
             conn.execute(
                 """INSERT INTO proxy_config (app_type, proxy_enabled, enabled) VALUES ('codex', 1, 1)
                    ON CONFLICT(app_type) DO UPDATE SET proxy_enabled=1, enabled=1, updated_at=datetime('now')"""
@@ -153,7 +149,7 @@ def prepare_write(db, live, no_restart, args_yes_label=""):
             C.warn("演练模式：不触碰正在运行的 CC Switch。")
 
 def finish_write(db, live, no_restart, targets):
-    """启动应用 + 按 targets 依次核验。targets: [("codex", entries) / ("claude-desktop", None)]"""
+    """启动应用 + 按 targets 依次核验。targets: [("codex", entries)]"""
     if not live or no_restart:
         C.log("\n== 完成（未重启 CC Switch）。请手动重启 CC Switch 使配置生效。==")
         return True
@@ -164,9 +160,6 @@ def finish_write(db, live, no_restart, targets):
         if kind == "codex":
             if not codex_post_verify(payload):
                 failed.append("codex")
-        elif kind == "claude-desktop":
-            if not claude_desktop_verify():
-                failed.append("claude-desktop")
     if failed:
         C.warn("接管核验未通过：" + "、".join(failed) +
                "。请按上方提示操作；配置本身已写入，回滚可用上方 .bak 文件。")
@@ -205,69 +198,6 @@ def codex_post_verify(entries):
         C.warn(f"未找到 {CODEX_CATALOG}")
         ok = False
     return ok
-
-# ---------------- claude-desktop 核验 ----------------
-
-def claude_desktop_verify(wait_secs=30, expect_mode="proxy"):
-    """claude-desktop 核验：CC Switch 仅在 UI 切换提供商时写 3P profile（【实测】无 CLI/deeplink/
-    启动自动补跑；官方文案即"重新切换当前供应商可修复"）。脚本写库后 profile 可能仍是旧内容——
-    轮询一小段时间，若未生效则给出明确的一次性手动步骤，不判失败。"""
-    C.log("→ 核验 Claude Desktop 接管结果 …")
-    lib = os.path.join(HOME, "Library", "Application Support", "Claude-3p", "configLibrary")
-    meta_p = os.path.join(lib, "_meta.json")
-    profile_p = os.path.join(lib, "00000000-0000-4000-8000-000000157210.json")
-
-    def _read_profile():
-        try:
-            return json.load(open(profile_p, encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-
-    data = None
-    deadline = time.time() + wait_secs
-    while time.time() < deadline:  # 兜底轮询（万一应用侧异步写入）
-        data = _read_profile()
-        if data and _profile_matches(data, expect_mode):
-            break
-        time.sleep(2)
-    data = data or _read_profile()
-
-    if data is None:
-        C.warn(f"未见 3P profile（{profile_p}）。请在 CC Switch 里切换一次 Claude Desktop 提供商以写出。")
-        return False
-
-    base = data.get("inferenceGatewayBaseUrl", "")
-    if _profile_matches(data, expect_mode):
-        C.log(f"  ✓ 3P profile 已应用：inferenceGatewayBaseUrl={base}")
-        if data.get("inferenceModels"):
-            names = [m if isinstance(m, str) else m.get("name", "?") for m in data["inferenceModels"]]
-            C.log(f"  ✓ 模型菜单（inferenceModels）：{', '.join(names)}")
-    else:
-        if expect_mode == "proxy":
-            C.warn(f"3P profile 仍是旧内容（base={base}）。CC Switch 仅在 UI 切换提供商时重写 profile："
-                   "请打开 CC Switch → Claude Desktop 页 → 点一下 CommandCode 卡片（重新切换），"
-                   "profile 会立即变为本机代理地址并只含映射模型。")
-        else:
-            C.warn(f"3P profile 仍是旧内容（base={base}）。请打开 CC Switch → Claude Desktop 页 →"
-                   "点一下 CommandCode 卡片（重新切换）。")
-        return False
-
-    cfg = os.path.join(HOME, "Library", "Application Support", "Claude", "claude_desktop_config.json")
-    if os.path.exists(cfg):
-        try:
-            mode = json.load(open(cfg, encoding="utf-8")).get("deploymentMode")
-            if mode != "3p":
-                C.warn(f"claude_desktop_config.json 的 deploymentMode={mode}（应为 3p）—— 请在 Claude Desktop 设置里切换到第三方部署模式。")
-        except (json.JSONDecodeError, OSError) as e:
-            C.warn(f"{cfg} 读取失败：{e}")
-    return True
-
-
-def _profile_matches(data, expect_mode):
-    base = data.get("inferenceGatewayBaseUrl", "")
-    if expect_mode == "proxy":
-        return base.rstrip("/").endswith("/claude-desktop")
-    return "commandcode.ai" in base
 
 # ---------------- codex 冒烟测试 ----------------
 

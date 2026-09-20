@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """ZCode 目标模块：把 CommandCode 写入 ~/.zcode/v2/config.json（kind=openai-compatible）。
 
-行为与原 ZCode-CommandCode-Setup 一致：探测收录 + 官网上下文 + 内嵌规则元数据，写入前备份。
+行为与原 ZCode-CommandCode-Setup 一致：公开目录收录 + 官网上下文 + 内嵌规则元数据，写入前备份。
 """
 
 import json
@@ -175,7 +175,7 @@ def find_provider(cfg, name):
 
 
 def run(key, upstream, args, shared_entries=None):
-    """ZCode 目标主流程。shared_entries 非空时复用已探测的收录结果（跳过重复探测）。"""
+    """ZCode 目标主流程。shared_entries 非空时复用已拉取的目录。"""
     C.log(f"\n===== 目标：ZCode（{CONFIG_PATH}） =====")
     if not os.path.isfile(CONFIG_PATH):
         C.die(f"未找到 ZCode 配置文件：{CONFIG_PATH}\n请先安装并启动一次 ZCode（生成配置后再运行本脚本）。")
@@ -194,7 +194,7 @@ def run(key, upstream, args, shared_entries=None):
             if input("继续写入吗？[y/N] ").strip().lower() not in ("y", "yes"):
                 C.die("已取消 ZCode 写入。", 0)
 
-    # 收录结果：复用共享探测或独立探测
+    # 收录结果：复用共享目录或独立拉取
     if shared_entries is not None:
         entries, excluded, notes = shared_entries
     else:
